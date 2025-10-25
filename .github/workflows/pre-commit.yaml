@@ -1,0 +1,84 @@
+name: Pre-commit
+
+on:
+  pull_request:
+    branches:
+      - main
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  discover:
+    runs-on: ubuntu-latest
+    outputs:
+      dirs: ${{ steps.setdirs.outputs.dirs }}
+    steps:
+      - uses: actions/checkout@v5
+      - id: changed
+        uses: tj-actions/changed-files@v47
+        with:
+          files: |
+            **/*.tf
+      - id: setdirs
+        run: |
+          # Find unique top-level module dirs touching *.tf; include '.' if only root
+          dirs="$(printf '%s\n' ${{ steps.changed.outputs.all_changed_files }} \
+            | xargs -I{} dirname {} \
+            | sort -u)"
+          if [ -z "$dirs" ]; then dirs="."; fi
+          echo "dirs=$(printf '%s' "$dirs" | jq -R -s -c 'split("\n")|map(select(length>0))')" >> "$GITHUB_OUTPUT"
+
+  lint:
+    needs: discover
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        dir: ${{ fromJson(needs.discover.outputs.dirs) }}
+        tfver: [ '1.13.0', '1.13.1', '1.13.2' ]
+    defaults:
+      run:
+        working-directory: ${{ matrix.dir }}
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Setup Terraform ${{ matrix.tfver }}
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ matrix.tfver }}
+
+      - name: Terraform fmt
+        run: terraform fmt -check -recursive
+
+      - name: Terraform init (no backend)
+        run: terraform init -backend=false
+
+      - name: Terraform validate
+        run: terraform validate -no-color
+
+      - name: Setup TFLint
+        uses: terraform-linters/setup-tflint@v5
+        with:
+          tflint_version: v0.59.1
+
+      - name: TFLint (init & run)
+        run: |
+          tflint --init
+          tflint --format compact
+
+  docs:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+
+      - name: terraform-docs check
+        uses: terraform-docs/gh-actions@v1.4.1
+        with:
+          output-file: README.md
+          output-method: inject
+          git-commit-message: 'chore(docs): update terraform docs'
+          git-push: true
